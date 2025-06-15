@@ -142,6 +142,78 @@ def search_videos(keyword, max_results=10, order="relevance"):
         st.error(f"予期しないエラーが発生しました: {e}")
         return pd.DataFrame()
 
+def get_channel_id_from_input(channel_input):
+    """様々な形式の入力からチャンネルIDを取得"""
+    if not youtube:
+        return None
+    
+    try:
+        # 既にチャンネルIDの場合（UCで始まる24文字）
+        if channel_input.startswith('UC') and len(channel_input) == 24:
+            return channel_input
+        
+        # カスタムURL（@ユーザー名）の場合
+        if '@' in channel_input:
+            # @ユーザー名の部分を抽出
+            if 'youtube.com/@' in channel_input:
+                username = channel_input.split('/@')[1].split('/')[0]
+            else:
+                username = channel_input.replace('@', '')
+            
+            # カスタムURLからチャンネルIDを検索
+            search_response = youtube.search().list(
+                q=username,
+                part='snippet',
+                type='channel',
+                maxResults=5
+            ).execute()
+            
+            if 'items' in search_response and search_response['items']:
+                for item in search_response['items']:
+                    channel_title = item['snippet']['channelTitle'].lower()
+                    if username.lower() in channel_title or channel_title in username.lower():
+                        return item['snippet']['channelId']
+        
+        # youtube.com/channel/形式
+        elif 'youtube.com/channel/' in channel_input:
+            return channel_input.split('channel/')[1].split('/')[0]
+        
+        # youtube.com/c/形式またはyoutube.com/user/形式
+        elif 'youtube.com/c/' in channel_input or 'youtube.com/user/' in channel_input:
+            if 'youtube.com/c/' in channel_input:
+                username = channel_input.split('/c/')[1].split('/')[0]
+            else:
+                username = channel_input.split('/user/')[1].split('/')[0]
+            
+            # チャンネル名で検索
+            search_response = youtube.search().list(
+                q=username,
+                part='snippet',
+                type='channel',
+                maxResults=5
+            ).execute()
+            
+            if 'items' in search_response and search_response['items']:
+                return search_response['items'][0]['snippet']['channelId']
+        
+        # それ以外の場合は検索で試行
+        else:
+            search_response = youtube.search().list(
+                q=channel_input,
+                part='snippet',
+                type='channel',
+                maxResults=1
+            ).execute()
+            
+            if 'items' in search_response and search_response['items']:
+                return search_response['items'][0]['snippet']['channelId']
+        
+        return None
+        
+    except Exception as e:
+        st.error(f"チャンネルID取得エラー: {e}")
+        return None
+
 def analyze_channel(channel_id):
     """チャンネルの詳細分析"""
     
@@ -291,52 +363,53 @@ elif analysis_type == "チャンネル分析":
     st.header("📺 チャンネル分析")
     
     channel_input = st.text_input(
-        "チャンネルID または URL", 
-        placeholder="例: UCNtZPzvkjjB3EuPMNY71cmA"
+        "チャンネルID、カスタムURL、またはチャンネル名", 
+        placeholder="例: @The_FirstTake, UCNtZPzvkjjB3EuPMNY71cmA, または First Take"
     )
     
-    # URLからチャンネルIDを抽出
-    if "youtube.com/channel/" in channel_input:
-        channel_id = channel_input.split("channel/")[1].split("/")[0]
-    else:
-        channel_id = channel_input
-    
     if st.button("分析", type="primary", use_container_width=True):
-        if channel_id:
-            with st.spinner("分析中..."):
-                channel_data, recent_videos = analyze_channel(channel_id)
+        if channel_input:
+            with st.spinner("チャンネルIDを取得中..."):
+                channel_id = get_channel_id_from_input(channel_input)
                 
-            if channel_data:
-                col1, col2 = st.columns([1, 3])
-                with col1:
-                    if channel_data['サムネイル']:
-                        st.image(channel_data['サムネイル'])
-                with col2:
-                    st.title(channel_data['チャンネル名'])
-                    st.text(f"開設日: {channel_data['開設日']}")
-                
-                # メトリクス
-                col1, col2, col3, col4 = st.columns(4)
-                with col1:
-                    st.metric("登録者数", f"{channel_data['登録者数']:,}")
-                with col2:
-                    st.metric("動画本数", f"{channel_data['動画本数']:,}")
-                with col3:
-                    st.metric("総視聴回数", f"{channel_data['総視聴回数']:,}")
-                with col4:
-                    avg_views = channel_data['総視聴回数'] / max(channel_data['動画本数'], 1)
-                    st.metric("平均視聴回数", f"{avg_views:,.0f}")
-                
-                # 説明
-                st.subheader("📝 チャンネル説明")
-                st.text(channel_data['説明'])
-                
-                # 最新動画
-                if not recent_videos.empty:
-                    st.subheader("🎬 最新動画")
-                    st.dataframe(recent_videos, use_container_width=True)
+            if channel_id:
+                st.success(f"チャンネルID: {channel_id}")
+                with st.spinner("分析中..."):
+                    channel_data, recent_videos = analyze_channel(channel_id)
+                    
+                if channel_data:
+                    col1, col2 = st.columns([1, 3])
+                    with col1:
+                        if channel_data['サムネイル']:
+                            st.image(channel_data['サムネイル'])
+                    with col2:
+                        st.title(channel_data['チャンネル名'])
+                        st.text(f"開設日: {channel_data['開設日']}")
+                    
+                    # メトリクス
+                    col1, col2, col3, col4 = st.columns(4)
+                    with col1:
+                        st.metric("登録者数", f"{channel_data['登録者数']:,}")
+                    with col2:
+                        st.metric("動画本数", f"{channel_data['動画本数']:,}")
+                    with col3:
+                        st.metric("総視聴回数", f"{channel_data['総視聴回数']:,}")
+                    with col4:
+                        avg_views = channel_data['総視聴回数'] / max(channel_data['動画本数'], 1)
+                        st.metric("平均視聴回数", f"{avg_views:,.0f}")
+                    
+                    # 説明
+                    st.subheader("📝 チャンネル説明")
+                    st.text(channel_data['説明'])
+                    
+                    # 最新動画
+                    if not recent_videos.empty:
+                        st.subheader("🎬 最新動画")
+                        st.dataframe(recent_videos, use_container_width=True)
+            else:
+                st.error("チャンネルが見つかりませんでした。入力内容を確認してください。")
         else:
-            st.warning("チャンネルIDを入力してください")
+            st.warning("チャンネル情報を入力してください")
 
 elif analysis_type == "トレンド分析":
     st.header("🔥 トレンド分析")
@@ -441,7 +514,7 @@ elif analysis_type == "競合分析":
     
     channels = []
     for i in range(5):
-        channel = st.text_input(f"チャンネルID {i+1}", key=f"channel_{i}")
+        channel = st.text_input(f"チャンネル情報 {i+1} (ID、@ユーザー名、またはチャンネル名)", key=f"channel_{i}")
         if channel:
             channels.append(channel)
     
@@ -454,27 +527,33 @@ elif analysis_type == "競合分析":
                 
                 for channel_id in channels:
                     try:
-                        channel_response = youtube.channels().list(
-                            part='statistics,snippet',
-                            id=channel_id
-                        ).execute()
+                        # まずチャンネルIDを正しく取得
+                        actual_channel_id = get_channel_id_from_input(channel_id)
                         
-                        if channel_response and 'items' in channel_response and channel_response['items']:
-                            item = channel_response['items'][0]
-                            stats = item.get('statistics', {})
-                            snippet = item.get('snippet', {})
+                        if actual_channel_id:
+                            channel_response = youtube.channels().list(
+                                part='statistics,snippet',
+                                id=actual_channel_id
+                            ).execute()
                             
-                            video_count = max(int(stats.get('videoCount', 1)), 1)  # ゼロ除算を防ぐ
-                            
-                            comparison_data.append({
-                                'チャンネル名': snippet.get('title', 'チャンネル名不明'),
-                                '登録者数': int(stats.get('subscriberCount', 0)),
-                                '動画本数': int(stats.get('videoCount', 0)),
-                                '総視聴回数': int(stats.get('viewCount', 0)),
-                                '平均視聴回数': int(stats.get('viewCount', 0)) / video_count
-                            })
+                            if channel_response and 'items' in channel_response and channel_response['items']:
+                                item = channel_response['items'][0]
+                                stats = item.get('statistics', {})
+                                snippet = item.get('snippet', {})
+                                
+                                video_count = max(int(stats.get('videoCount', 1)), 1)  # ゼロ除算を防ぐ
+                                
+                                comparison_data.append({
+                                    'チャンネル名': snippet.get('title', 'チャンネル名不明'),
+                                    '登録者数': int(stats.get('subscriberCount', 0)),
+                                    '動画本数': int(stats.get('videoCount', 0)),
+                                    '総視聴回数': int(stats.get('viewCount', 0)),
+                                    '平均視聴回数': int(stats.get('viewCount', 0)) / video_count
+                                })
+                        else:
+                            st.warning(f"チャンネル '{channel_id}' が見つかりませんでした。")
                     except Exception as e:
-                        st.warning(f"チャンネルID {channel_id} の取得に失敗しました: {e}")
+                        st.warning(f"チャンネル '{channel_id}' の取得に失敗しました: {e}")
                 
                 if comparison_data:
                     df = pd.DataFrame(comparison_data)
