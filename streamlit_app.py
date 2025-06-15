@@ -142,6 +142,67 @@ def search_videos(keyword, max_results=10, order="relevance"):
         st.error(f"予期しないエラーが発生しました: {e}")
         return pd.DataFrame()
 
+def get_channel_id_from_handle(handle):
+    """YouTubeハンドル（@username）から直接チャンネルIDを取得する代替方法"""
+    try:
+        # ハンドルベースの検索を試行
+        # まず channels().list() で forHandle パラメータを使用（新しいAPI機能）
+        try:
+            response = youtube.channels().list(
+                part='id,snippet',
+                forHandle=handle.replace('@', '')
+            ).execute()
+            
+            if 'items' in response and response['items']:
+                return response['items'][0]['id']
+        except:
+            # forHandle が利用できない場合はスキップ
+            pass
+        
+        # 検索APIを使用
+        search_queries = [
+            f'"{handle}"',
+            f'"{handle.replace("@", "")}"',
+            handle.replace('@', ''),
+            handle.replace('@', '').replace('_', ' ')
+        ]
+        
+        for query in search_queries:
+            try:
+                search_response = youtube.search().list(
+                    q=query,
+                    part='snippet',
+                    type='channel',
+                    maxResults=10
+                ).execute()
+                
+                if 'items' in search_response and search_response['items']:
+                    # より厳密なマッチングを試行
+                    handle_clean = handle.replace('@', '').lower()
+                    
+                    for item in search_response['items']:
+                        channel_title = item['snippet']['channelTitle'].lower()
+                        
+                        # 様々なマッチングパターンを試行
+                        if (handle_clean in channel_title or
+                            channel_title.replace(' ', '_') == handle_clean or
+                            channel_title.replace(' ', '') == handle_clean or
+                            handle_clean.replace('_', ' ') in channel_title):
+                            return item['snippet']['channelId']
+                    
+                    # 完全マッチがない場合は最初の結果を返す
+                    return search_response['items'][0]['snippet']['channelId']
+                        
+            except Exception as e:
+                st.write(f"検索クエリ '{query}' でエラー: {e}")
+                continue
+        
+        return None
+        
+    except Exception as e:
+        st.error(f"ハンドル検索エラー: {e}")
+        return None
+
 def get_channel_id_from_input(channel_input):
     """様々な形式の入力からチャンネルIDを取得"""
     if not youtube:
@@ -156,23 +217,39 @@ def get_channel_id_from_input(channel_input):
         if '@' in channel_input:
             # @ユーザー名の部分を抽出
             if 'youtube.com/@' in channel_input:
-                username = channel_input.split('/@')[1].split('/')[0]
+                handle = '@' + channel_input.split('/@')[1].split('/')[0]
             else:
-                username = channel_input.replace('@', '')
+                handle = channel_input if channel_input.startswith('@') else '@' + channel_input
             
-            # カスタムURLからチャンネルIDを検索
+            st.info(f"検索中のハンドル: {handle}")
+            
+            # 新しいハンドル検索方法を使用
+            channel_id = get_channel_id_from_handle(handle)
+            if channel_id:
+                return channel_id
+            
+            # 従来の検索方法も試行
+            username = handle.replace('@', '')
+            st.info(f"従来の検索方法でユーザー名を検索: {username}")
+            
             search_response = youtube.search().list(
                 q=username,
                 part='snippet',
                 type='channel',
-                maxResults=5
+                maxResults=10
             ).execute()
             
+            st.write(f"検索結果数: {len(search_response.get('items', []))}")
+            
+            # デバッグ情報を表示
             if 'items' in search_response and search_response['items']:
-                for item in search_response['items']:
-                    channel_title = item['snippet']['channelTitle'].lower()
-                    if username.lower() in channel_title or channel_title in username.lower():
-                        return item['snippet']['channelId']
+                st.write("見つかったチャンネル:")
+                for i, item in enumerate(search_response['items']):
+                    channel_title = item['snippet']['channelTitle']
+                    channel_id = item['snippet']['channelId']
+                    st.write(f"{i+1}. {channel_title} (ID: {channel_id})")
+                
+                return search_response['items'][0]['snippet']['channelId']
         
         # youtube.com/channel/形式
         elif 'youtube.com/channel/' in channel_input:
@@ -202,7 +279,7 @@ def get_channel_id_from_input(channel_input):
                 q=channel_input,
                 part='snippet',
                 type='channel',
-                maxResults=1
+                maxResults=5
             ).execute()
             
             if 'items' in search_response and search_response['items']:
@@ -212,6 +289,7 @@ def get_channel_id_from_input(channel_input):
         
     except Exception as e:
         st.error(f"チャンネルID取得エラー: {e}")
+        st.write(f"エラー詳細: {str(e)}")
         return None
 
 def analyze_channel(channel_id):
