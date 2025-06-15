@@ -84,6 +84,11 @@ def search_videos(keyword, max_results=10, order="relevance"):
             order=order
         ).execute()
         
+        # レスポンスの検証
+        if 'items' not in search_response or not search_response['items']:
+            st.warning("検索結果が見つかりませんでした。")
+            return pd.DataFrame()
+        
         video_ids = [item['id']['videoId'] for item in search_response['items']]
         
         # 動画の詳細情報を取得
@@ -92,10 +97,15 @@ def search_videos(keyword, max_results=10, order="relevance"):
             id=','.join(video_ids)
         ).execute()
         
+        # レスポンスの検証
+        if 'items' not in videos_response or not videos_response['items']:
+            st.warning("動画の詳細情報を取得できませんでした。")
+            return pd.DataFrame()
+        
         videos_data = []
         for item in videos_response['items']:
-            stats = item['statistics']
-            snippet = item['snippet']
+            stats = item.get('statistics', {})
+            snippet = item.get('snippet', {})
             
             # エンゲージメント率を計算
             view_count = int(stats.get('viewCount', 0))
@@ -106,22 +116,30 @@ def search_videos(keyword, max_results=10, order="relevance"):
             if view_count > 0:
                 engagement_rate = ((like_count + comment_count) / view_count) * 100
             
+            # サムネイルURLの安全な取得
+            thumbnail_url = ""
+            if 'thumbnails' in snippet and 'medium' in snippet['thumbnails']:
+                thumbnail_url = snippet['thumbnails']['medium']['url']
+            
             videos_data.append({
-                'タイトル': snippet['title'],
-                'チャンネル': snippet['channelTitle'],
-                '公開日': snippet['publishedAt'][:10],
+                'タイトル': snippet.get('title', 'タイトル不明'),
+                'チャンネル': snippet.get('channelTitle', 'チャンネル不明'),
+                '公開日': snippet.get('publishedAt', '')[:10] if snippet.get('publishedAt') else '',
                 '視聴回数': view_count,
                 'いいね数': like_count,
                 'コメント数': comment_count,
                 'エンゲージメント率': round(engagement_rate, 2),
-                '動画ID': item['id'],
-                'サムネイル': snippet['thumbnails']['medium']['url']
+                '動画ID': item.get('id', ''),
+                'サムネイル': thumbnail_url
             })
         
         return pd.DataFrame(videos_data)
     
     except HttpError as e:
         st.error(f"APIエラー: {e}")
+        return pd.DataFrame()
+    except Exception as e:
+        st.error(f"予期しないエラーが発生しました: {e}")
         return pd.DataFrame()
 
 def analyze_channel(channel_id):
@@ -139,43 +157,63 @@ def analyze_channel(channel_id):
             id=channel_id
         ).execute()
         
-        if not channel_response['items']:
-            st.error("チャンネルが見つかりません")
+        # レスポンスの検証を強化
+        if not channel_response or 'items' not in channel_response or not channel_response['items']:
+            st.error("チャンネルが見つかりません。チャンネルIDを確認してください。")
             return None, pd.DataFrame()
         
         item = channel_response['items'][0]
-        stats = item['statistics']
-        snippet = item['snippet']
+        stats = item.get('statistics', {})
+        snippet = item.get('snippet', {})
+        content_details = item.get('contentDetails', {})
+        
+        # サムネイルURLの安全な取得
+        thumbnail_url = ""
+        if 'thumbnails' in snippet and 'high' in snippet['thumbnails']:
+            thumbnail_url = snippet['thumbnails']['high']['url']
         
         channel_data = {
-            'チャンネル名': snippet['title'],
+            'チャンネル名': snippet.get('title', 'チャンネル名不明'),
             '登録者数': int(stats.get('subscriberCount', 0)),
             '動画本数': int(stats.get('videoCount', 0)),
             '総視聴回数': int(stats.get('viewCount', 0)),
-            '開設日': snippet['publishedAt'][:10],
-            '説明': snippet['description'][:200] + "..." if snippet['description'] else "",
-            'サムネイル': snippet['thumbnails']['high']['url']
+            '開設日': snippet.get('publishedAt', '')[:10] if snippet.get('publishedAt') else '',
+            '説明': (snippet.get('description', '')[:200] + "...") if snippet.get('description') else "説明なし",
+            'サムネイル': thumbnail_url
         }
         
         # 最新動画を取得
-        playlist_id = item['contentDetails']['relatedPlaylists']['uploads']
-        playlist_response = youtube.playlistItems().list(
-            part='snippet',
-            playlistId=playlist_id,
-            maxResults=10
-        ).execute()
+        recent_videos = pd.DataFrame()
         
-        recent_videos = []
-        for video in playlist_response['items']:
-            recent_videos.append({
-                'タイトル': video['snippet']['title'],
-                '公開日': video['snippet']['publishedAt'][:10]
-            })
+        if 'relatedPlaylists' in content_details and 'uploads' in content_details['relatedPlaylists']:
+            playlist_id = content_details['relatedPlaylists']['uploads']
+            
+            try:
+                playlist_response = youtube.playlistItems().list(
+                    part='snippet',
+                    playlistId=playlist_id,
+                    maxResults=10
+                ).execute()
+                
+                if 'items' in playlist_response and playlist_response['items']:
+                    recent_videos_data = []
+                    for video in playlist_response['items']:
+                        video_snippet = video.get('snippet', {})
+                        recent_videos_data.append({
+                            'タイトル': video_snippet.get('title', 'タイトル不明'),
+                            '公開日': video_snippet.get('publishedAt', '')[:10] if video_snippet.get('publishedAt') else ''
+                        })
+                    recent_videos = pd.DataFrame(recent_videos_data)
+            except HttpError as e:
+                st.warning(f"最新動画の取得に失敗しました: {e}")
         
-        return channel_data, pd.DataFrame(recent_videos)
+        return channel_data, recent_videos
     
     except HttpError as e:
         st.error(f"APIエラー: {e}")
+        return None, pd.DataFrame()
+    except Exception as e:
+        st.error(f"予期しないエラーが発生しました: {e}")
         return None, pd.DataFrame()
 
 # メインコンテンツ
@@ -227,7 +265,8 @@ if analysis_type == "動画検索・分析":
                 for idx, row in df.iterrows():
                     col1, col2 = st.columns([1, 4])
                     with col1:
-                        st.image(row['サムネイル'], width=200)
+                        if row['サムネイル']:
+                            st.image(row['サムネイル'], width=200)
                     with col2:
                         st.markdown(f"### {row['タイトル']}")
                         st.text(f"チャンネル: {row['チャンネル']} | 公開日: {row['公開日']}")
@@ -242,7 +281,8 @@ if analysis_type == "動画検索・分析":
                         with col_d:
                             st.metric("エンゲージメント率", f"{row['エンゲージメント率']}%")
                         
-                        st.markdown(f"[YouTubeで見る](https://youtube.com/watch?v={row['動画ID']})")
+                        if row['動画ID']:
+                            st.markdown(f"[YouTubeで見る](https://youtube.com/watch?v={row['動画ID']})")
                     st.divider()
         else:
             st.warning("検索キーワードを入力してください")
@@ -269,7 +309,8 @@ elif analysis_type == "チャンネル分析":
             if channel_data:
                 col1, col2 = st.columns([1, 3])
                 with col1:
-                    st.image(channel_data['サムネイル'])
+                    if channel_data['サムネイル']:
+                        st.image(channel_data['サムネイル'])
                 with col2:
                     st.title(channel_data['チャンネル名'])
                     st.text(f"開設日: {channel_data['開設日']}")
@@ -331,54 +372,67 @@ elif analysis_type == "トレンド分析":
                     
                     response = youtube.videos().list(**request_params).execute()
                     
-                    trending_data = []
-                    for item in response['items']:
-                        stats = item['statistics']
-                        snippet = item['snippet']
-                        
-                        trending_data.append({
-                            'タイトル': snippet['title'],
-                            'チャンネル': snippet['channelTitle'],
-                            '視聴回数': int(stats.get('viewCount', 0)),
-                            'いいね数': int(stats.get('likeCount', 0)),
-                            'サムネイル': snippet['thumbnails']['medium']['url'],
-                            '動画ID': item['id']
-                        })
-                    
-                    df = pd.DataFrame(trending_data)
-                    
-                    if not df.empty:
-                        # グラフ表示
-                        st.subheader("📊 トレンド動画の視聴回数")
-                        fig = px.bar(df.head(10), 
-                            x='タイトル', 
-                            y='視聴回数',
-                            color='視聴回数',
-                            color_continuous_scale='Reds'
-                        )
-                        fig.update_xaxes(tickangle=-45)          # ← ここのメソッド名を修正
-                        fig.update_layout(height=500)
-                        st.plotly_chart(fig, use_container_width=True)
-                        
-                        # 動画リスト
-                        st.subheader("🎥 トレンド動画")
-                        for i, (_, row) in enumerate(df.iterrows(), start=1):
-                            col1, col2 = st.columns([1, 4])
-                            with col1:
-                                st.image(row['サムネイル'], width=200)
-                            with col2:
-                                st.markdown(f"### {i}. {row['タイトル']}")
-                                st.text(f"チャンネル: {row['チャンネル']}")
-                                col_a, col_b = st.columns(2)
-                                with col_a:
-                                    st.metric("視聴回数", f"{row['視聴回数']:,}")
-                                with col_b:
-                                    st.metric("いいね数", f"{row['いいね数']:,}")
-                                st.markdown(f"[YouTubeで見る](https://youtube.com/watch?v={row['動画ID']})")
-                            st.divider()
+                    # レスポンスの検証
+                    if 'items' not in response or not response['items']:
+                        st.warning("トレンド動画が見つかりませんでした。")
+                    else:
+                        trending_data = []
+                        for item in response['items']:
+                            stats = item.get('statistics', {})
+                            snippet = item.get('snippet', {})
                             
+                            # サムネイルURLの安全な取得
+                            thumbnail_url = ""
+                            if 'thumbnails' in snippet and 'medium' in snippet['thumbnails']:
+                                thumbnail_url = snippet['thumbnails']['medium']['url']
+                            
+                            trending_data.append({
+                                'タイトル': snippet.get('title', 'タイトル不明'),
+                                'チャンネル': snippet.get('channelTitle', 'チャンネル不明'),
+                                '視聴回数': int(stats.get('viewCount', 0)),
+                                'いいね数': int(stats.get('likeCount', 0)),
+                                'サムネイル': thumbnail_url,
+                                '動画ID': item.get('id', '')
+                            })
+                        
+                        df = pd.DataFrame(trending_data)
+                        
+                        if not df.empty:
+                            # グラフ表示
+                            st.subheader("📊 トレンド動画の視聴回数")
+                            fig = px.bar(df.head(10), 
+                                x='タイトル', 
+                                y='視聴回数',
+                                color='視聴回数',
+                                color_continuous_scale='Reds'
+                            )
+                            fig.update_xaxes(tickangle=-45)
+                            fig.update_layout(height=500)
+                            st.plotly_chart(fig, use_container_width=True)
+                            
+                            # 動画リスト
+                            st.subheader("🎥 トレンド動画")
+                            for i, (_, row) in enumerate(df.iterrows(), start=1):
+                                col1, col2 = st.columns([1, 4])
+                                with col1:
+                                    if row['サムネイル']:
+                                        st.image(row['サムネイル'], width=200)
+                                with col2:
+                                    st.markdown(f"### {i}. {row['タイトル']}")
+                                    st.text(f"チャンネル: {row['チャンネル']}")
+                                    col_a, col_b = st.columns(2)
+                                    with col_a:
+                                        st.metric("視聴回数", f"{row['視聴回数']:,}")
+                                    with col_b:
+                                        st.metric("いいね数", f"{row['いいね数']:,}")
+                                    if row['動画ID']:
+                                        st.markdown(f"[YouTubeで見る](https://youtube.com/watch?v={row['動画ID']})")
+                                st.divider()
+                                
                 except HttpError as e:
                     st.error(f"APIエラー: {e}")
+                except Exception as e:
+                    st.error(f"予期しないエラーが発生しました: {e}")
 
 elif analysis_type == "競合分析":
     st.header("⚔️ 競合チャンネル分析")
@@ -405,20 +459,22 @@ elif analysis_type == "競合分析":
                             id=channel_id
                         ).execute()
                         
-                        if channel_response['items']:
+                        if channel_response and 'items' in channel_response and channel_response['items']:
                             item = channel_response['items'][0]
-                            stats = item['statistics']
-                            snippet = item['snippet']
+                            stats = item.get('statistics', {})
+                            snippet = item.get('snippet', {})
+                            
+                            video_count = max(int(stats.get('videoCount', 1)), 1)  # ゼロ除算を防ぐ
                             
                             comparison_data.append({
-                                'チャンネル名': snippet['title'],
+                                'チャンネル名': snippet.get('title', 'チャンネル名不明'),
                                 '登録者数': int(stats.get('subscriberCount', 0)),
                                 '動画本数': int(stats.get('videoCount', 0)),
                                 '総視聴回数': int(stats.get('viewCount', 0)),
-                                '平均視聴回数': int(stats.get('viewCount', 0)) / max(int(stats.get('videoCount', 1)), 1)
+                                '平均視聴回数': int(stats.get('viewCount', 0)) / video_count
                             })
-                    except:
-                        pass
+                    except Exception as e:
+                        st.warning(f"チャンネルID {channel_id} の取得に失敗しました: {e}")
                 
                 if comparison_data:
                     df = pd.DataFrame(comparison_data)
@@ -436,10 +492,13 @@ elif analysis_type == "競合分析":
                     fig = go.Figure()
                     
                     for _, row in df_normalized.iterrows():
+                        values = row[['登録者数', '動画本数', '総視聴回数', '平均視聴回数']].tolist()
+                        values.append(values[0])  # 最初の値を追加してループを閉じる
+                        
                         fig.add_trace(
                             go.Scatterpolar(
-                                r=row[['登録者数', '動画本数', '総視聴回数', '平均視聴回数']].tolist()+ [row['登録者数']],
-                                theta=['登録者数', '動画本数', '総視聴回数', '平均視聴回数'],
+                                r=values,
+                                theta=['登録者数', '動画本数', '総視聴回数', '平均視聴回数', '登録者数'],
                                 fill='toself',
                                 name=row['チャンネル名']
                             )
@@ -465,6 +524,8 @@ elif analysis_type == "競合分析":
                         '総視聴回数': '{:,}',
                         '平均視聴回数': '{:,.0f}'
                     }), use_container_width=True)
+                else:
+                    st.error("チャンネルデータを取得できませんでした。チャンネルIDを確認してください。")
 
 else:  # キーワード分析
     st.header("🔑 キーワード分析")
@@ -486,43 +547,52 @@ else:  # キーワード分析
                             maxResults=50
                         ).execute()
                         
-                        # キーワードを抽出
-                        keywords = {}
-                        
-                        for item in search_response['items']:
-                            title = item['snippet']['title'].lower()
-                            # タイトルから単語を抽出
-                            words = title.split()
-                            for word in words:
-                                if len(word) > 3 and word != base_keyword.lower():
-                                    keywords[word] = keywords.get(word, 0) + 1
-                        
-                        # 上位キーワード
-                        top_keywords = sorted(keywords.items(), key=lambda x: x[1], reverse=True)[:20]
-                        
-                        if top_keywords:
-                            # 棒グラフ
-                            df = pd.DataFrame(top_keywords, columns=['キーワード', '出現回数'])
+                        # レスポンスの検証
+                        if 'items' not in search_response or not search_response['items']:
+                            st.warning("検索結果が見つかりませんでした。")
+                        else:
+                            # キーワードを抽出
+                            keywords = {}
                             
-                            fig = px.bar(df, 
-                                x='出現回数', 
-                                y='キーワード',
-                                orientation='h',
-                                color='出現回数',
-                                color_continuous_scale='Reds'
-                            )
-                            fig.update_layout(height=600)
-                            st.plotly_chart(fig, use_container_width=True)
+                            for item in search_response['items']:
+                                snippet = item.get('snippet', {})
+                                title = snippet.get('title', '').lower()
+                                # タイトルから単語を抽出
+                                words = title.split()
+                                for word in words:
+                                    if len(word) > 3 and word != base_keyword.lower():
+                                        keywords[word] = keywords.get(word, 0) + 1
                             
-                            # ワードクラウド風の表示
-                            st.subheader("🏷️ 関連キーワード")
-                            cols = st.columns(4)
-                            for idx, (keyword, count) in enumerate(top_keywords):
-                                with cols[idx % 4]:
-                                    st.button(f"{keyword} ({count})", key=f"kw_{idx}")
+                            # 上位キーワード
+                            top_keywords = sorted(keywords.items(), key=lambda x: x[1], reverse=True)[:20]
                             
+                            if top_keywords:
+                                # 棒グラフ
+                                df = pd.DataFrame(top_keywords, columns=['キーワード', '出現回数'])
+                                
+                                fig = px.bar(df, 
+                                    x='出現回数', 
+                                    y='キーワード',
+                                    orientation='h',
+                                    color='出現回数',
+                                    color_continuous_scale='Reds'
+                                )
+                                fig.update_layout(height=600)
+                                st.plotly_chart(fig, use_container_width=True)
+                                
+                                # ワードクラウド風の表示
+                                st.subheader("🏷️ 関連キーワード")
+                                cols = st.columns(4)
+                                for idx, (keyword, count) in enumerate(top_keywords):
+                                    with cols[idx % 4]:
+                                        st.button(f"{keyword} ({count})", key=f"kw_{idx}")
+                            else:
+                                st.warning("関連キーワードが見つかりませんでした。")
+                                
                     except HttpError as e:
                         st.error(f"APIエラー: {e}")
+                    except Exception as e:
+                        st.error(f"予期しないエラーが発生しました: {e}")
         else:
             st.warning("キーワードを入力してください")
 
